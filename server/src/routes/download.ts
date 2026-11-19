@@ -1,97 +1,117 @@
-import { Hono } from "hono";
-import { spawn } from "child_process";
-import { uploadMp3ToS3 } from "../lib/index.js";
-import fs from "fs/promises";
-import path from "path";
+import { Hono } from 'hono'
+import { spawn } from 'child_process'
+import { uploadMp3ToS3 } from '../lib/index.js'
+import fs from 'fs/promises'
+import path from 'path'
 
-const download = new Hono();
+const download = new Hono()
 
-function getAudioFileFromSite(
-  siteUrl: string,
-): Promise<{ fileName: string; buffer: Buffer }> {
+function getAudioFileFromSite(siteUrl: string): Promise<{
+  buffer: Buffer
+  show: string
+  episode: string
+}> {
   return new Promise((resolve, reject) => {
     // We can use a temporary output template so we know where/what to look for
-    const outputTemplate = path.join("/tmp", "%(id)s.%(ext)s");
+    const outputTemplate = path.join('/tmp', '%(id)s.%(ext)s')
+    const urlPortions = siteUrl.split('/')
 
-    const ytDlpProcess = spawn("yt-dlp", [
-      "-x",
-      "--audio-format",
-      "mp3",
-      "-o",
+    const showName = urlPortions[4]
+    const episodeName = urlPortions[6]
+
+    const ytDlpProcess = spawn('yt-dlp', [
+      '-x',
+      '--audio-format',
+      'mp3',
+      '-o',
       outputTemplate,
       siteUrl,
-    ]);
+    ])
 
-    let ytDlpOutput = "";
-    let errorOutput = "";
+    let ytDlpOutput = ''
+    let errorOutput = ''
+    let currentPercentage = 0
+    ytDlpProcess.stdout.on('data', (data) => {
+      const dataString = data.toString() as string
 
-    ytDlpProcess.stdout.on("data", (data) => {
-      ytDlpOutput += data.toString();
-    });
+      const isPercentLine =
+        dataString.includes('[download]') && dataString.includes('%')
 
-    ytDlpProcess.stderr.on("data", (data) => {
-      errorOutput += data.toString();
-    });
+      if (isPercentLine) {
+        console.log(dataString)
 
-    ytDlpProcess.on("close", async (code) => {
+        const foundPercent = Number(
+          dataString.split(']')[1].split('%')[0].toString().trim(),
+        )
+
+        currentPercentage = foundPercent
+      }
+
+      ytDlpOutput += dataString
+    })
+
+    ytDlpProcess.stderr.on('data', (data) => {
+      errorOutput += data.toString()
+    })
+
+    ytDlpProcess.on('close', async (code) => {
       if (code !== 0) {
-        return reject(new Error(`yt-dlp error: ${errorOutput.trim()}`));
+        return reject(new Error(`yt-dlp error: ${errorOutput.trim()}`))
       }
 
       try {
         // yt-dlp outputs lines like: [ExtractAudio] Destination: /tmp/xxxxxx.mp3
         // We can parse stdout to find the exact filename it created, or look for the final .mp3 file
-        const match = ytDlpOutput.match(/Destination:\s*(.+\.mp3)/i);
+        const match = ytDlpOutput.match(/Destination:\s*(.+\.mp3)/i)
         if (!match || !match[1]) {
           return reject(
             new Error(
-              "Could not determine downloaded MP3 filename from yt-dlp output.",
+              'Could not determine downloaded MP3 filename from yt-dlp output.',
             ),
-          );
+          )
         }
 
-        const filePath = match[1].trim();
-        const fileName = path.basename(filePath);
+        const filePath = match[1].trim()
 
-        // Read the file into a Node.js Buffer
-        const buffer = await fs.readFile(filePath);
+        const buffer = await fs.readFile(filePath)
 
-        // Optional cleanup: Delete the local file from /tmp after reading it into memory
-        await fs.unlink(filePath).catch(() => {});
+        // cleanup: Delete the local file from /tmp after reading it into memory
+        await fs.unlink(filePath).catch(() => {})
 
-        resolve({ fileName, buffer });
+        resolve({ buffer, show: showName, episode: episodeName })
       } catch (err) {
-        reject(err);
+        reject(err)
       }
-    });
-  });
+    })
+  })
 }
 
-download.post("/", async (c) => {
+download.post('/', async (c) => {
   try {
-    const body = await c.req.json();
+    const body = await c.req.json()
 
-    const url = body.url;
+    const url = body.url
 
-    if (!url || typeof url !== "string") {
-      return c.json({ error: "No audio file provided" }, 400);
+    if (!url || typeof url !== 'string') {
+      return c.json({ error: 'No audio file provided' }, 400)
     }
 
-    const { buffer, fileName } = await getAudioFileFromSite(url);
-    console.log(`Downloaded ${fileName} from ${url}.`);
+    const { buffer, episode, show } = await getAudioFileFromSite(url)
+    console.log(`Downloaded ${episode} from ${url}.`)
 
-    console.log(`Uploading ${fileName} to Railway bucket...`);
+    console.log(`Uploading ${episode} to Railway bucket inside ${show} file`)
+    const combinedFileName = `${show}/${episode}.mp3`
 
-    await uploadMp3ToS3(fileName, buffer);
+    await uploadMp3ToS3(combinedFileName, buffer)
 
-    return c.json({ fileName, success: true }, 200);
+    return c.json({ combinedFileName, success: true }, 200)
   } catch (error: any) {
-    console.error("Streaming error:", error);
+    console.error('Streaming error:', error)
     return c.json(
-      { error: error.message || "Internal server error.", success: false },
+      { error: error.message || 'Internal server error.', success: false },
       500,
-    );
+    )
   }
-});
+})
 
-export { download };
+export { download }
